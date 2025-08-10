@@ -1,0 +1,185 @@
+# docker-compose.yml (frontend section)
+version: '3.9'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+      args:
+        REACT_APP_API_BASE_URL: http://localhost:3003
+        REACT_APP_TENANT_MODE: multi
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - NGINX_HOST=localhost
+      - NGINX_PORT=80
+    volumes:
+      - ./tenant-assets:/usr/share/nginx/html/tenant-assets:ro
+    networks:
+      - printer-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=HostRegexp(`{subdomain:[a-zA-Z0-9-]+}.localhost`)"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+  
+  # API Gateway
+  api-gateway:
+    build: 
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - printer-network
+
+  # Authentication Service
+  auth-service:
+    build: 
+      context: ./services/auth
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+      - JWT_SECRET=your-jwt-secret-here
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - printer-network
+
+  # Etsy Integration Service
+  etsy-service:
+    build: 
+      context: ./services/etsy
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+      - REDIS_URL=redis://redis:6379
+      - ETSY_API_BASE_URL=https://api.etsy.com/v3
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - printer-network
+
+  # Design Management Service (Go)
+  design-service:
+    build: 
+      context: ./services/design
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - printer-network
+
+  # Analytics Service
+  analytics-service:
+    build: 
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+    depends_on:
+      - postgres
+    networks:
+      - printer-network
+
+  # Job Queue Worker
+  job-worker:
+    build: 
+      context: ./services/jobs
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - printer-network
+
+  # Infrastructure Services
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=etsy_saas
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - printer-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - printer-network
+
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    networks:
+      - printer-network
+
+  # Reverse Proxy
+  traefik:
+    image: traefik:v2.10
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - printer-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  tenant-assets:
+
+networks:
+  printer-network:
+    driver: bridge

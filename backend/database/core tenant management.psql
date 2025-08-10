@@ -1,0 +1,60 @@
+-- Core tenant management
+CREATE SCHEMA IF NOT EXISTS core;
+
+CREATE TABLE core.tenants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subdomain VARCHAR(63) UNIQUE NOT NULL,
+    company_name VARCHAR(255) NOT NULL,
+    subscription_tier VARCHAR(50) DEFAULT 'basic',
+    database_schema VARCHAR(63) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE core.tenant_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID REFERENCES core.tenants(id),
+    email VARCHAR(255) NOT NULL,
+    hashed_password VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'user',
+    permissions JSONB,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Function to create tenant schema
+CREATE OR REPLACE FUNCTION create_tenant_schema(tenant_id UUID, schema_name VARCHAR)
+RETURNS VOID AS $$
+BEGIN
+    -- Create schema
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', schema_name);
+    
+    -- Create tenant-specific tables
+    EXECUTE format('
+        CREATE TABLE %I.orders (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            etsy_receipt_id BIGINT,
+            total_amount DECIMAL(10,2),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )', schema_name);
+    
+    EXECUTE format('
+        CREATE TABLE %I.products (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name VARCHAR(255) NOT NULL,
+            etsy_listing_id BIGINT,
+            price DECIMAL(10,2),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )', schema_name);
+    
+    EXECUTE format('
+        CREATE TABLE %I.designs (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name VARCHAR(255) NOT NULL,
+            file_path VARCHAR(500),
+            file_size BIGINT,
+            tags TEXT[],
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )', schema_name);
+END;
+$$ LANGUAGE plpgsql;
