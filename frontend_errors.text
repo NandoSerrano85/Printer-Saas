@@ -1,0 +1,70 @@
+framework-5429a50ba5373c56.js:9 Uncaught Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at lg (framework-5429a50ba5373c56.js:9:46457)
+    at i (framework-5429a50ba5373c56.js:9:121104)
+    at oD (framework-5429a50ba5373c56.js:9:99071)
+    at framework-5429a50ba5373c56.js:9:98938
+    at oO (framework-5429a50ba5373c56.js:9:98945)
+    at ox (framework-5429a50ba5373c56.js:9:93984)
+    at x (framework-5429a50ba5373c56.js:33:1364)
+    at MessagePort.T (framework-5429a50ba5373c56.js:33:1894)
+
+framework-5429a50ba5373c56.js:9 Uncaught Error: Minified React error #423; visit https://reactjs.org/docs/error-decoder.html?invariant=423 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at i (framework-5429a50ba5373c56.js:9:120773)
+    at oD (framework-5429a50ba5373c56.js:9:99071)
+    at framework-5429a50ba5373c56.js:9:98938
+    at oO (framework-5429a50ba5373c56.js:9:98945)
+    at oE (framework-5429a50ba5373c56.js:9:95697)
+    at ox (framework-5429a50ba5373c56.js:9:94252)
+    at x (framework-5429a50ba5373c56.js:33:1364)
+    at MessagePort.T (framework-5429a50ba5373c56.js:33:1894)
+dashboard:1 Access to XMLHttpRequest at 'http://localhost:8000/api/v1/dashboard/' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+dashboard-c28a5f21ee6b0463.js:1 Error loading dashboard data: 
+M {message: 'Network Error', name: 'AxiosError', code: 'ERR_NETWORK', config: {…}, request: XMLHttpRequest, …}
+97-bb502faa08c58671.js:6 
+ GET http://localhost:8000/api/v1/dashboard/ net::ERR_FAILED 500 (Internal Server Error)
+dashboard:1 Access to XMLHttpRequest at 'http://localhost:8000/api/v1/shopify/integration/status' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+97-bb502faa08c58671.js:6 
+ GET http://localhost:8000/api/v1/shopify/integration/status net::ERR_FAILED 500 (Internal Server Error)
+dashboard:1 Access to XMLHttpRequest at 'http://localhost:8000/api/v1/etsy/integration/status' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+97-bb502faa08c58671.js:6 
+ GET http://localhost:8000/api/v1/etsy/integration/status net::ERR_FAILED 500 (Internal Server Error)
+97-bb502faa08c58671.js:6 
+ GET http://localhost:8000/api/v1/dashboard/analytics 404 (Not Found)
+
+ 
+ GET http://localhost:3000/analytics 404 (Not Found)
+z	@	main-40944f8ed46050dc.js:1
+handleRouteInfoError	@	main-40944f8ed46050dc.js:1
+getRouteInfo	@	main-40944f8ed46050dc.js:1
+await in getRouteInfo		
+change	@	main-40944f8ed46050dc.js:1
+
+ 
+ GET http://localhost:3000/analytics 404 (Not Found)
+z	@	main-40944f8ed46050dc.js:1
+handleRouteInfoError	@	main-40944f8ed46050dc.js:1
+getRouteInfo	@	main-40944f8ed46050dc.js:1
+await in getRouteInfo		
+change	@	main-40944f8ed46050dc.js:1
+
+
+integrations:1 Access to XMLHttpRequest at 'http://localhost:8000/api/v1/shopify/integration/status' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.Understand this error
+97-bb502faa08c58671.js:6  GET http://localhost:8000/api/v1/shopify/integration/status net::ERR_FAILED 500 (Internal Server Error)
+(anonymous) @ 97-bb502faa08c58671.js:6
+xhr @ 97-bb502faa08c58671.js:6
+tj @ 97-bb502faa08c58671.js:6
+Promise.then
+request @ 97-bb502faa08c58671.js:6
+tM.<computed> @ 97-bb502faa08c58671.js:6
+(anonymous) @ 97-bb502faa08c58671.js:6
+get @ 752-a62676380f341a95.js:1
+getShopifyIntegrationStatus @ 752-a62676380f341a95.js:1
+W @ integrations-b62e0ab86e1b04ca.js:1
+(anonymous) @ integrations-b62e0ab86e1b04ca.js:1
+uU @ framework-5429a50ba5373c56.js:9
+oV @ framework-5429a50ba5373c56.js:9
+o @ framework-5429a50ba5373c56.js:9
+x @ framework-5429a50ba5373c56.js:33
+T @ framework-5429a50ba5373c56.js:33Understand this error
+integrations:1 Access to XMLHttpRequest at 'http://localhost:8000/api/v1/etsy/integration/status' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.Understand this error
+97-bb502faa08c58671.js:6  GET http://localhost:8000/api/v1/etsy/integration/status net::ERR_FAILED 500 (Internal Server Error)

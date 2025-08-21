@@ -1,0 +1,377 @@
+version: '3.8'
+
+services:
+  # =============================================================================
+  # DATABASE SERVICES
+  # =============================================================================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: printer-saas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: printer_saas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-dev_password_123}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    networks:
+      - printer-saas-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d printer_saas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # =============================================================================
+  # CACHE AND MESSAGE BROKER
+  # =============================================================================
+  
+  redis:
+    image: redis:7-alpine
+    container_name: printer-saas-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - printer-saas-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # BACKEND SERVICES
+  # =============================================================================
+  
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-backend
+    restart: unless-stopped
+    env_file:
+      - .env.development
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD:-dev_password_123}@postgres:5432/printer_saas
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: printer_saas
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-dev_password_123}
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # Celery
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HOST: 0.0.0.0
+      PORT: 8000
+      
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-jwt-secret-key-change-in-production-12345678901234567890}
+      SESSION_SECRET_KEY: ${SESSION_SECRET_KEY:-dev-session-secret-key-change-in-production-12345678901234567890}
+      
+      # CORS
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://frontend:3000}
+      
+      # Etsy Integration
+      ETSY_CLIENT_ID: ${ETSY_CLIENT_ID:-7u70el8uj45wmbg1580nc0ly}
+      ETSY_CLIENT_SECRET: ${ETSY_CLIENT_SECRET:-i7pgilutwq}
+      ETSY_OAUTH_REDIRECT_URI: ${ETSY_OAUTH_REDIRECT_URI:-http://localhost:8000/api/v1/etsy/oauth/callback}
+      ETSY_WEBHOOK_SECRET: ${ETSY_WEBHOOK_SECRET:-dev-etsy-webhook-secret-123456789}
+      
+      # Shopify Integration
+      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-2f764b0cf8afa8e196e1c7a8b586ca3b}
+      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-8b4aa78226facaf2757d50f426a14ac2}
+      SHOPIFY_OAUTH_REDIRECT_URI: ${SHOPIFY_OAUTH_REDIRECT_URI:-http://localhost:8000/api/v1/shopify/oauth/callback}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET:-a8f5f167f44f4964e6c998dee827110c}
+      
+      # File Storage
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      
+      # Features
+      FEATURE_ETSY_INTEGRATION: ${FEATURE_ETSY_INTEGRATION:-true}
+      FEATURE_SHOPIFY_INTEGRATION: ${FEATURE_SHOPIFY_INTEGRATION:-true}
+      FEATURE_BATCH_OPERATIONS: ${FEATURE_BATCH_OPERATIONS:-true}
+      FEATURE_WEBHOOK_PROCESSING: ${FEATURE_WEBHOOK_PROCESSING:-true}
+      
+      # Monitoring
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      PROMETHEUS_METRICS_ENABLED: ${PROMETHEUS_METRICS_ENABLED:-true}
+      
+      # Auto Migration
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =============================================================================
+  # BACKGROUND WORKER SERVICES
+  # =============================================================================
+  
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-celery-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "worker", "worker", "--loglevel=info", "--concurrency=4"]
+    env_file:
+      - .env.development
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD:-dev_password_123}@postgres:5432/printer_saas
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-jwt-secret-key-change-in-production-12345678901234567890}
+      
+      # API Integration
+      ETSY_CLIENT_ID: ${ETSY_CLIENT_ID:-7u70el8uj45wmbg1580nc0ly}
+      ETSY_CLIENT_SECRET: ${ETSY_CLIENT_SECRET:-i7pgilutwq}
+      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-2f764b0cf8afa8e196e1c7a8b586ca3b}
+      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-8b4aa78226facaf2757d50f426a14ac2}
+      
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-celery-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "worker", "beat", "--loglevel=info"]
+    env_file:
+      - .env.development
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD:-dev_password_123}@postgres:5432/printer_saas
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  # =============================================================================
+  # FRONTEND SERVICE
+  # =============================================================================
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: printer-saas-frontend
+    restart: unless-stopped
+    env_file:
+      - .env.development
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Printer SaaS}
+      NEXT_PUBLIC_ENVIRONMENT: ${ENVIRONMENT:-development}
+      
+      # Feature Flags
+      NEXT_PUBLIC_FEATURE_ETSY_INTEGRATION: ${FEATURE_ETSY_INTEGRATION:-true}
+      NEXT_PUBLIC_FEATURE_SHOPIFY_INTEGRATION: ${FEATURE_SHOPIFY_INTEGRATION:-true}
+      NEXT_PUBLIC_FEATURE_BATCH_OPERATIONS: ${FEATURE_BATCH_OPERATIONS:-true}
+      
+    ports:
+      - "${FRONTEND_PORT:-3000}:8000"
+    networks:
+      - printer-saas-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # =============================================================================
+  # MONITORING SERVICES
+  # =============================================================================
+  
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: printer-saas-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - printer-saas-network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: printer-saas-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    networks:
+      - printer-saas-network
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # =============================================================================
+  # DEVELOPMENT TOOLS
+  # =============================================================================
+  
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: printer-saas-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@printersaas.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    networks:
+      - printer-saas-network
+    depends_on:
+      - postgres
+    profiles:
+      - development
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: printer-saas-redis-commander
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    networks:
+      - printer-saas-network
+    depends_on:
+      - redis
+    profiles:
+      - development
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+
+networks:
+  printer-saas-network:
+    driver: bridge
+    name: printer-saas-network
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+
+volumes:
+  postgres_data:
+    driver: local
+    name: printer-saas-postgres-data
+  
+  redis_data:
+    driver: local
+    name: printer-saas-redis-data
+  
+  prometheus_data:
+    driver: local
+    name: printer-saas-prometheus-data
+  
+  grafana_data:
+    driver: local
+    name: printer-saas-grafana-data
+  
+  pgadmin_data:
+    driver: local
+    name: printer-saas-pgadmin-data

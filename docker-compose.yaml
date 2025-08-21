@@ -1,13 +1,14 @@
-# docker-compose.yml (frontend section)
+# docker-compose.yml - Integrated Multi-tenant Backend Architecture
 version: '3.9'
 
 services:
+  # Frontend Application
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.frontend
       args:
-        REACT_APP_API_BASE_URL: http://localhost:3003
+        REACT_APP_API_BASE_URL: http://localhost:8000
         REACT_APP_TENANT_MODE: multi
     ports:
       - "3000:80"
@@ -24,115 +25,97 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.frontend.rule=HostRegexp(`{subdomain:[a-zA-Z0-9-]+}.localhost`)"
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
-  
-  # API Gateway
+
+  # Integrated Backend Application (All Services)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=your-jwt-secret-here-change-in-production
+      - ETSY_API_BASE_URL=https://api.etsy.com/v3
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - ENVIRONMENT=development
+      - DEFAULT_TENANT_ID=default
+      - LOG_LEVEL=info
+      - ALLOWED_ORIGINS=http://localhost:3000,https://localhost:3000
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - printer-network
+    volumes:
+      - ./backend:/app
+      - ./.env.development:/app/.env:ro
+      - /app/__pycache__  # Exclude cache
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`api.localhost`) || PathPrefix(`/api/`)"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+
+  # API Gateway (Optional - for advanced routing)
   api-gateway:
     build: 
-      context: ./services/gateway
+      context: ./backend/pkg/gateway
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
+      - BACKEND_URL=http://localhost:8000
       - REDIS_URL=redis://redis:6379
     depends_on:
+      - backend
       - redis
     networks:
       - printer-network
-
-  # Authentication Service
-  auth-service:
-    build: 
-      context: ./services/auth
-      dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
-    environment:
-      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
-      - JWT_SECRET=your-jwt-secret-here
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - printer-network
-
-  # Etsy Integration Service
-  etsy-service:
-    build: 
-      context: ./services/etsy
-      dockerfile: Dockerfile
-    ports:
-      - "8002:8002"
-    environment:
-      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
-      - REDIS_URL=redis://redis:6379
-      - ETSY_API_BASE_URL=https://api.etsy.com/v3
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - printer-network
-
-  # Design Management Service (Go)
-  design-service:
-    build: 
-      context: ./services/design
-      dockerfile: Dockerfile
-    ports:
-      - "8003:8003"
-    environment:
-      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-    depends_on:
-      - postgres
-      - minio
-    networks:
-      - printer-network
-
-  # Analytics Service
-  analytics-service:
-    build: 
-      context: ./services/analytics
-      dockerfile: Dockerfile
-    ports:
-      - "8004:8004"
-    environment:
-      - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
-    depends_on:
-      - postgres
-    networks:
-      - printer-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gateway.rule=Host(`gateway.localhost`)"
 
   # Job Queue Worker
   job-worker:
     build: 
-      context: ./services/jobs
+      context: ./backend/services/jobs
       dockerfile: Dockerfile
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/etsy_saas
+      - BACKEND_URL=http://localhost:8000
     depends_on:
       - redis
       - postgres
+      - backend
     networks:
       - printer-network
 
   # Infrastructure Services
   postgres:
-    image: postgres:15
+    image: postgres:15-alpine
     environment:
       - POSTGRES_DB=etsy_saas
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=password
+      - POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./backend/database/seed_data.sql:/docker-entrypoint-initdb.d/02-seed.sql
     ports:
       - "5432:5432"
     networks:
       - printer-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d etsy_saas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -142,9 +125,14 @@ services:
       - redis_data:/data
     networks:
       - printer-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
-    image: minio/minio
+    image: minio/minio:latest
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -152,34 +140,89 @@ services:
       - minio_data:/data
     environment:
       - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
     command: server /data --console-address ":9001"
     networks:
       - printer-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
-  # Reverse Proxy
+  # Reverse Proxy & Load Balancer
   traefik:
-    image: traefik:v2.10
+    image: traefik:v3.0
     command:
+      - --api.dashboard=true
+      - --api.insecure=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
+      - --log.level=INFO
     ports:
       - "80:80"
       - "443:443"
-      - "8080:8080"  # Dashboard
+      - "8081:8080"  # Traefik Dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - printer-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+
+  # Monitoring & Observability (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - printer-network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    networks:
+      - printer-network
+    profiles:
+      - monitoring
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local
   minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
   tenant-assets:
+    driver: local
 
 networks:
   printer-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

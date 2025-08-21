@@ -25,7 +25,7 @@ export const ThemeProvider = ({ children }) => {
         favicon.href = tenant.theme.favicon;
       }
     }
-  }, [tenant]);
+  }, []);
 
   return <div className="theme-container">{children}</div>;
 };

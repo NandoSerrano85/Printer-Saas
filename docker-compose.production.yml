@@ -1,249 +1,349 @@
-# docker-compose.production.yml
 version: '3.8'
 
 services:
-  # Load Balancer / Reverse Proxy
-  traefik:
-    image: traefik:v2.10
-    container_name: etsy-traefik
-    command:
-      - --api.dashboard=true
-      - --api.insecure=true
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-      - --certificatesresolvers.letsencrypt.acme.email=admin@yourdomain.com
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --metrics.prometheus=true
-    ports:
-      - "80:80"
-      - "443:443"
-      - "8080:8080"  # Dashboard
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "./letsencrypt:/letsencrypt"
-    networks:
-      - etsy-network
+  # =============================================================================
+  # DATABASE SERVICES
+  # =============================================================================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: printer-saas-postgres-prod
     restart: unless-stopped
+    environment:
+      POSTGRES_DB: printer_saas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    networks:
+      - printer-saas-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 30s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d printer_saas"]
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
+  # =============================================================================
+  # CACHE AND MESSAGE BROKER
+  # =============================================================================
+  
   redis:
     image: redis:7-alpine
-    container_name: etsy-redis
+    container_name: printer-saas-redis-prod
+    restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.5'
-        reservations:
-          memory: 512M
-          cpus: '0.25'
+      - "${REDIS_PORT:-6379}:6379"
     networks:
-      - etsy-network
-    restart: unless-stopped
+      - printer-saas-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
 
-  minio:
-    image: minio/minio:latest
-    container_name: etsy-minio
-    command: server /data --console-address ":9001"
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
-      - MINIO_BROWSER_REDIRECT_URL=https://minio.yourdomain.com
-    volumes:
-      - minio_data:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1.0'
-        reservations:
-          memory: 512M
-          cpus: '0.5'
-    networks:
-      - etsy-network
+  # =============================================================================
+  # BACKEND SERVICES
+  # =============================================================================
+  
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-backend-prod
     restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD}@postgres:5432/printer_saas
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: printer_saas
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # Celery
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: production
+      DEBUG: false
+      LOG_LEVEL: warning
+      HOST: 0.0.0.0
+      PORT: 8000
+      
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      SESSION_SECRET_KEY: ${SESSION_SECRET_KEY}
+      
+      # CORS
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      
+      # Etsy Integration
+      ETSY_CLIENT_ID: ${ETSY_CLIENT_ID}
+      ETSY_CLIENT_SECRET: ${ETSY_CLIENT_SECRET}
+      ETSY_OAUTH_REDIRECT_URI: ${ETSY_OAUTH_REDIRECT_URI}
+      ETSY_WEBHOOK_SECRET: ${ETSY_WEBHOOK_SECRET}
+      
+      # Shopify Integration
+      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID}
+      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET}
+      SHOPIFY_OAUTH_REDIRECT_URI: ${SHOPIFY_OAUTH_REDIRECT_URI}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
+      
+      # File Storage
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      
+      # Features
+      FEATURE_ETSY_INTEGRATION: ${FEATURE_ETSY_INTEGRATION:-true}
+      FEATURE_SHOPIFY_INTEGRATION: ${FEATURE_SHOPIFY_INTEGRATION:-true}
+      FEATURE_BATCH_OPERATIONS: ${FEATURE_BATCH_OPERATIONS:-true}
+      FEATURE_WEBHOOK_PROCESSING: ${FEATURE_WEBHOOK_PROCESSING:-true}
+      
+      # Monitoring
+      SENTRY_DSN: ${SENTRY_DSN}
+      PROMETHEUS_METRICS_ENABLED: ${PROMETHEUS_METRICS_ENABLED:-true}
+      
+      # Auto Migration
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.minio.rule=Host(`minio.yourdomain.com`)"
-      - "traefik.http.routers.minio.tls=true"
-      - "traefik.http.routers.minio.tls.certresolver=letsencrypt"
-      - "traefik.http.services.minio.loadbalancer.server.port=9001"
+      start_period: 60s
 
-  # Monitoring Stack
+  # =============================================================================
+  # BACKGROUND WORKER SERVICES
+  # =============================================================================
+  
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-celery-worker-prod
+    restart: unless-stopped
+    command: ["celery", "-A", "worker", "worker", "--loglevel=warning", "--concurrency=4"]
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD}@postgres:5432/printer_saas
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: production
+      LOG_LEVEL: warning
+      
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      
+      # API Integration
+      ETSY_CLIENT_ID: ${ETSY_CLIENT_ID}
+      ETSY_CLIENT_SECRET: ${ETSY_CLIENT_SECRET}
+      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID}
+      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET}
+      
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-celery-beat-prod
+    restart: unless-stopped
+    command: ["celery", "-A", "worker", "beat", "--loglevel=warning"]
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:${DATABASE_PASSWORD}@postgres:5432/printer_saas
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      
+      # Application
+      ENVIRONMENT: production
+      LOG_LEVEL: warning
+      
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - printer-saas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  # =============================================================================
+  # FRONTEND SERVICE
+  # =============================================================================
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    container_name: printer-saas-frontend-prod
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Printer SaaS}
+      NEXT_PUBLIC_ENVIRONMENT: production
+      
+      # Feature Flags
+      NEXT_PUBLIC_FEATURE_ETSY_INTEGRATION: ${FEATURE_ETSY_INTEGRATION:-true}
+      NEXT_PUBLIC_FEATURE_SHOPIFY_INTEGRATION: ${FEATURE_SHOPIFY_INTEGRATION:-true}
+      NEXT_PUBLIC_FEATURE_BATCH_OPERATIONS: ${FEATURE_BATCH_OPERATIONS:-true}
+      
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks:
+      - printer-saas-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # =============================================================================
+  # REVERSE PROXY (OPTIONAL)
+  # =============================================================================
+  
+  nginx:
+    image: nginx:alpine
+    container_name: printer-saas-nginx-prod
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - printer-saas-network
+    depends_on:
+      - frontend
+      - backend
+    profiles:
+      - nginx
+
+  # =============================================================================
+  # MONITORING SERVICES (OPTIONAL)
+  # =============================================================================
+  
   prometheus:
     image: prom/prometheus:latest
-    container_name: etsy-prometheus
+    container_name: printer-saas-prometheus-prod
+    restart: unless-stopped
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1.0'
-        reservations:
-          memory: 512M
-          cpus: '0.5'
+      - "${PROMETHEUS_PORT:-9090}:9090"
     networks:
-      - etsy-network
-    restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.prometheus.rule=Host(`prometheus.yourdomain.com`)"
-      - "traefik.http.routers.prometheus.tls=true"
-      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - printer-saas-network
+    profiles:
+      - monitoring
 
   grafana:
     image: grafana/grafana:latest
-    container_name: etsy-grafana
+    container_name: printer-saas-grafana-prod
+    restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      - GF_USERS_ALLOW_SIGN_UP=false
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: false
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
     ports:
-      - "3000:3000"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
+      - "${GRAFANA_PORT:-3001}:3000"
+    networks:
+      - printer-saas-network
     depends_on:
       - prometheus
-    networks:
-      - etsy-network
-    restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`monitoring.yourdomain.com`)"
-      - "traefik.http.routers.grafana.tls=true"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+    profiles:
+      - monitoring
 
-  # Log Management
-  loki:
-    image: grafana/loki:latest
-    container_name: etsy-loki
-    command: -config.file=/etc/loki/local-config.yaml
-    volumes:
-      - ./monitoring/loki/config.yaml:/etc/loki/local-config.yaml
-      - loki_data:/loki
-    ports:
-      - "3100:3100"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
-    networks:
-      - etsy-network
-    restart: unless-stopped
+# =============================================================================
+# NETWORKS
+# =============================================================================
 
-  promtail:
-    image: grafana/promtail:latest
-    container_name: etsy-promtail
-    command: -config.file=/etc/promtail/config.yml
-    volumes:
-      - ./monitoring/promtail/config.yml:/etc/promtail/config.yml
-      - /var/log:/var/log:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.25'
-        reservations:
-          memory: 128M
-          cpus: '0.1'
-    depends_on:
-      - loki
-    networks:
-      - etsy-network
-    restart: unless-stopped
+networks:
+  printer-saas-network:
+    driver: bridge
+    name: printer-saas-network
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
 
 volumes:
   postgres_data:
     driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/postgres
-      o: bind
+    name: printer-saas-postgres-data
+  
   redis_data:
     driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/redis
-      o: bind
-  minio_data:
-    driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/minio
-      o: bind
+    name: printer-saas-redis-data
+  
   prometheus_data:
     driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/prometheus
-      o: bind
+    name: printer-saas-prometheus-data
+  
   grafana_data:
     driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/grafana
-      o: bind
-  loki_data:
-    driver: local
-    driver_opts:
-      type: none
-      device: /share/Container/volumes/loki
-      o: bind
-
-networks:
-  etsy-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    name: printer-saas-grafana-data

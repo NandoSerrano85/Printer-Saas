@@ -1,0 +1,282 @@
+version: '3.8'
+
+services:
+  # =============================================================================
+  # DATABASE SERVICES
+  # =============================================================================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: printer-saas-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: printer_saas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev_password_123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./backend/database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    networks:
+      - printer-saas-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d printer_saas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # =============================================================================
+  # CACHE AND MESSAGE BROKER
+  # =============================================================================
+  
+  redis:
+    image: redis:7-alpine
+    container_name: printer-saas-redis-dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - printer-saas-dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # BACKEND SERVICES
+  # =============================================================================
+  
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-backend-dev
+    restart: unless-stopped
+    env_file:
+      - .env.development
+    environment:
+      # Override some settings for Docker networking
+      DATABASE_HOST: postgres
+      DATABASE_URL: postgresql://postgres:dev_password_123@postgres:5432/printer_saas
+      REDIS_HOST: redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+      - backend_dev_uploads:/app/uploads
+    ports:
+      - "8000:8000"
+    networks:
+      - printer-saas-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # =============================================================================
+  # BACKGROUND WORKER SERVICES
+  # =============================================================================
+  
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: printer-saas-celery-dev
+    restart: unless-stopped
+    env_file:
+      - .env.development
+    environment:
+      DATABASE_URL: postgresql://postgres:dev_password_123@postgres:5432/printer_saas
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    networks:
+      - printer-saas-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: ["celery", "-A", "worker", "worker", "--loglevel=info", "--concurrency=2"]
+
+  # =============================================================================
+  # DEVELOPMENT TOOLS
+  # =============================================================================
+  
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: printer-saas-pgadmin-dev
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@printersaas.dev
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_dev_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    networks:
+      - printer-saas-dev
+    depends_on:
+      - postgres
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: printer-saas-redis-commander-dev
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    networks:
+      - printer-saas-dev
+    depends_on:
+      - redis
+
+  # =============================================================================
+  # MONITORING (Optional for development)
+  # =============================================================================
+  
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: printer-saas-prometheus-dev
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=24h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_dev_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - printer-saas-dev
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: printer-saas-grafana-dev
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_dev_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    networks:
+      - printer-saas-dev
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # =============================================================================
+  # FRONTEND SERVICE
+  # =============================================================================
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: printer-saas-frontend-dev
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    networks:
+      - printer-saas-dev
+    depends_on:
+      - backend
+
+  # =============================================================================
+  # MOCK SERVICES FOR DEVELOPMENT
+  # =============================================================================
+  
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: printer-saas-mailhog-dev
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    networks:
+      - printer-saas-dev
+    profiles:
+      - development
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+
+networks:
+  printer-saas-dev:
+    driver: bridge
+    name: printer-saas-dev-network
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+
+volumes:
+  postgres_dev_data:
+    driver: local
+    name: printer-saas-postgres-dev-data
+  
+  redis_dev_data:
+    driver: local
+    name: printer-saas-redis-dev-data
+  
+  backend_dev_uploads:
+    driver: local
+    name: printer-saas-backend-dev-uploads
+  
+  prometheus_dev_data:
+    driver: local
+    name: printer-saas-prometheus-dev-data
+  
+  grafana_dev_data:
+    driver: local
+    name: printer-saas-grafana-dev-data
+  
+  pgadmin_dev_data:
+    driver: local
+    name: printer-saas-pgadmin-dev-data

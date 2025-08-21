@@ -1,137 +1,170 @@
-# services/common/security_middleware.py
 from fastapi import Request, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import jwt
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 import time
 import hashlib
-from typing import Dict, List
-import redis
+import json
+import logging
+from typing import Dict, Optional
+import os
 
-security = HTTPBearer()
-redis_client = redis.Redis.from_url(REDIS_URL)
+logger = logging.getLogger(__name__)
 
-class SecurityMiddleware:
-    def __init__(self):
+class TenantSecurityMiddleware(BaseHTTPMiddleware):
+    """Security middleware for tenant isolation and rate limiting"""
+    
+    def __init__(self, app, rate_limit_enabled: bool = True):
+        super().__init__(app)
+        self.rate_limit_enabled = rate_limit_enabled
         self.rate_limits = {
             "api_calls": {"limit": 1000, "window": 3600},  # 1000 calls per hour
             "auth_attempts": {"limit": 5, "window": 900},   # 5 attempts per 15 minutes
         }
+        # In-memory rate limiting for development (would use Redis in production)
+        self._rate_limit_cache = {}
     
-    async def rate_limit_check(self, identifier: str, limit_type: str) -> bool:
-        """Check if request is within rate limits"""
+    async def dispatch(self, request: Request, call_next):
+        """Main middleware dispatch method"""
+        start_time = time.time()
+        
+        try:
+            # Skip security checks for health and metrics endpoints
+            if request.url.path in ["/health", "/health/", "/metrics", "/metrics/", "/", "/docs", "/openapi.json"]:
+                return await call_next(request)
+            
+            # Rate limiting check
+            if self.rate_limit_enabled:
+                client_ip = self._get_client_ip(request)
+                if not await self._check_rate_limit(client_ip, "api_calls"):
+                    await self._log_security_event("rate_limit_exceeded", {
+                        "client_ip": client_ip,
+                        "path": request.url.path,
+                        "method": request.method
+                    })
+                    return Response(
+                        content=json.dumps({"error": "Rate limit exceeded"}),
+                        status_code=429,
+                        headers={"Content-Type": "application/json"}
+                    )
+            
+            # Extract tenant context
+            tenant_id = self._extract_tenant_from_request(request)
+            if tenant_id:
+                request.state.tenant_id = tenant_id
+            
+            # Add security headers
+            response = await call_next(request)
+            
+            # Add security headers to response
+            self._add_security_headers(response)
+            
+            # Log request for monitoring
+            processing_time = time.time() - start_time
+            logger.info(
+                f"Request processed: {request.method} {request.url.path} "
+                f"- {response.status_code} - {processing_time:.3f}s"
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Security middleware error: {str(e)}")
+            return Response(
+                content=json.dumps({"error": "Internal server error"}),
+                status_code=500,
+                headers={"Content-Type": "application/json"}
+            )
+    
+    def _get_client_ip(self, request: Request) -> str:
+        """Extract client IP address from request"""
+        # Check for forwarded headers first (for load balancers/proxies)
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+        
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
+        
+        # Fallback to direct client
+        return request.client.host if request.client else "unknown"
+    
+    def _extract_tenant_from_request(self, request: Request) -> Optional[str]:
+        """Extract tenant ID from request (subdomain, header, or path)"""
+        # Method 1: From subdomain
+        host = request.headers.get("host", "")
+        if "." in host:
+            subdomain = host.split(".")[0]
+            if subdomain and subdomain not in ["www", "api", "app"]:
+                return subdomain
+        
+        # Method 2: From X-Tenant-ID header
+        tenant_header = request.headers.get("X-Tenant-ID")
+        if tenant_header:
+            return tenant_header
+        
+        # Method 3: From path parameter (if using /tenant/{tenant_id}/ pattern)
+        path_parts = request.url.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "tenant":
+            return path_parts[1]
+        
+        # Default tenant for development
+        return os.getenv("DEFAULT_TENANT_ID", "default")
+    
+    async def _check_rate_limit(self, identifier: str, limit_type: str) -> bool:
+        """Check if request is within rate limits (in-memory implementation)"""
+        if not self.rate_limit_enabled:
+            return True
+        
         config = self.rate_limits.get(limit_type)
         if not config:
             return True
         
-        key = f"rate_limit:{limit_type}:{identifier}"
         current_time = int(time.time())
         window_start = current_time - config["window"]
         
-        # Remove old entries
-        redis_client.zremrangebyscore(key, 0, window_start)
+        # Clean up old entries
+        if identifier not in self._rate_limit_cache:
+            self._rate_limit_cache[identifier] = {}
         
-        # Count current requests in window
-        current_count = redis_client.zcard(key)
+        if limit_type not in self._rate_limit_cache[identifier]:
+            self._rate_limit_cache[identifier][limit_type] = []
         
+        # Remove old timestamps
+        self._rate_limit_cache[identifier][limit_type] = [
+            timestamp for timestamp in self._rate_limit_cache[identifier][limit_type]
+            if timestamp > window_start
+        ]
+        
+        # Check if over limit
+        current_count = len(self._rate_limit_cache[identifier][limit_type])
         if current_count >= config["limit"]:
             return False
         
-        # Add current request
-        redis_client.zadd(key, {str(current_time): current_time})
-        redis_client.expire(key, config["window"])
-        
+        # Add current timestamp
+        self._rate_limit_cache[identifier][limit_type].append(current_time)
         return True
     
-    async def validate_jwt_token(self, token: str) -> Dict:
-        """Validate JWT token and extract claims"""
-        try:
-            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            
-            # Check if token is blacklisted
-            token_hash = hashlib.sha256(token.encode()).hexdigest()
-            if redis_client.get(f"blacklist:{token_hash}"):
-                raise HTTPException(401, "Token has been revoked")
-            
-            # Check token expiration
-            if payload.get("exp", 0) < time.time():
-                raise HTTPException(401, "Token has expired")
-            
-            return payload
-            
-        except jwt.InvalidTokenError:
-            raise HTTPException(401, "Invalid token")
-    
-    async def check_tenant_access(self, token_payload: Dict, requested_tenant: str) -> bool:
-        """Verify user has access to requested tenant"""
-        token_tenant = token_payload.get("tenant_id")
-        
-        if not token_tenant:
-            return False
-        
-        if token_tenant != requested_tenant:
-            # Check if user has multi-tenant access (admin users)
-            user_permissions = token_payload.get("permissions", [])
-            if "admin:cross_tenant" not in user_permissions:
-                return False
-        
-        return True
-    
-    async def log_security_event(self, event_type: str, details: Dict):
-        """Log security-related events"""
-        security_logger = TenantLogger("security")
-        security_logger.warning(f"Security event: {event_type}", **details)
-        
-        # Store in Redis for monitoring
-        event_key = f"security_events:{int(time.time())}"
-        event_data = {
-            "type": event_type,
-            "timestamp": time.time(),
-            "details": details
-        }
-        redis_client.setex(event_key, 86400, json.dumps(event_data))  # 24 hours
-
-@app.middleware("http")
-async def security_middleware(request: Request, call_next):
-    security_handler = SecurityMiddleware()
-    
-    # Skip security checks for health endpoints
-    if request.url.path in ["/health", "/metrics"]:
-        return await call_next(request)
-    
-    # Rate limiting based on IP
-    client_ip = request.client.host
-    if not await security_handler.rate_limit_check(client_ip, "api_calls"):
-        await security_handler.log_security_event("rate_limit_exceeded", {
-            "client_ip": client_ip,
-            "path": request.url.path
+    def _add_security_headers(self, response: Response):
+        """Add security headers to response"""
+        response.headers.update({
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-XSS-Protection": "1; mode=block",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
         })
-        raise HTTPException(429, "Rate limit exceeded")
     
-    # Token validation for protected endpoints
-    if request.url.path.startswith("/api/"):
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(401, "Missing or invalid authorization header")
+    async def _log_security_event(self, event_type: str, details: Dict):
+        """Log security-related events"""
+        logger.warning(
+            f"Security event: {event_type}",
+            extra={
+                "event_type": event_type,
+                "details": details,
+                "timestamp": time.time()
+            }
+        )
         
-        token = auth_header.split(" ")[1]
-        payload = await security_handler.validate_jwt_token(token)
-        
-        # Extract tenant from subdomain or header
-        tenant_id = extract_tenant_from_request(request)
-        
-        if not await security_handler.check_tenant_access(payload, tenant_id):
-            await security_handler.log_security_event("unauthorized_tenant_access", {
-                "user_id": payload.get("user_id"),
-                "requested_tenant": tenant_id,
-                "user_tenant": payload.get("tenant_id"),
-                "client_ip": client_ip
-            })
-            raise HTTPException(403, "Access denied to tenant")
-        
-        # Add to request state
-        request.state.tenant_id = tenant_id
-        request.state.user_id = payload.get("user_id")
-        request.state.permissions = payload.get("permissions", [])
-    
-    response = await call_next(request)
-    return response
+        # In production, this would also send to a SIEM system or security monitoring service
